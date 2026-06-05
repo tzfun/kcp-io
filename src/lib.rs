@@ -42,7 +42,10 @@ pub mod tokio_rt;
 
 // Convenience re-exports when kcp-tokio is enabled (default)
 #[cfg(feature = "kcp-tokio")]
-pub use tokio_rt::{KcpListener, KcpSessionConfig, KcpStream, KcpTokioError, KcpTokioResult};
+pub use tokio_rt::{
+    KcpListener, KcpSessionConfig, KcpStream, KcpTokioError, KcpTokioResult, KcpTransport,
+    KcpUdpTransport,
+};
 
 // Convenience re-exports when kcp-core is enabled
 #[cfg(feature = "kcp-core")]

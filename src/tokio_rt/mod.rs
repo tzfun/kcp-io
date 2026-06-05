@@ -43,8 +43,10 @@ mod error;
 mod listener;
 mod session;
 mod stream;
+pub mod transport;
 
 pub use config::KcpSessionConfig;
 pub use error::{KcpTokioError, KcpTokioResult};
 pub use listener::KcpListener;
 pub use stream::{KcpStream, OwnedReadHalf, OwnedWriteHalf};
+pub use transport::{KcpTransport, KcpUdpTransport};

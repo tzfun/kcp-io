@@ -1,0 +1,28 @@
+{
+  "description": "Project-specific settings for kcp-io — Rust KCP networking library",
+  "permissions": {
+    "allow": [
+      "Bash(cargo build)",
+      "Bash(cargo build --*)",
+      "Bash(cargo test)",
+      "Bash(cargo test --*)",
+      "Bash(cargo fmt)",
+      "Bash(cargo fmt --*)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo doc *)",
+      "Bash(cargo bench)",
+      "Bash(cargo bench --*)",
+      "Bash(cargo check)",
+      "Bash(cargo check --*)",
+      "Bash(cargo publish --dry-run)",
+      "Bash(cargo tree *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(git show *)",
+      "Bash(ls *)",
+      "Bash(dir *)"
+    ]
+  }
+}

@@ -26,6 +26,7 @@ use super::config::KcpSessionConfig;
 use super::error::{KcpTokioError, KcpTokioResult};
 use super::session::KcpSession;
 use super::stream::KcpStream;
+use super::transport::KcpUdpTransport;
 use crate::core::Kcp;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -181,9 +182,11 @@ impl KcpListener {
             }
             // Create new session for unknown (addr, conv) pair
             let (pkt_tx, pkt_rx) = mpsc::channel::<Vec<u8>>(256);
+            let transport = Arc::new(KcpUdpTransport::new(socket.clone()));
             let session = match KcpSession::new_with_channel(
                 conv,
                 socket.clone(),
+                transport,
                 addr,
                 config.clone(),
                 pkt_rx,

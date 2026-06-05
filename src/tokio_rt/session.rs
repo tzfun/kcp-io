@@ -11,6 +11,7 @@
 
 use super::config::KcpSessionConfig;
 use super::error::{KcpTokioError, KcpTokioResult};
+use super::transport::KcpTransport;
 use crate::core::Kcp;
 use std::io;
 use std::net::SocketAddr;
@@ -45,6 +46,8 @@ pub struct KcpSession {
     kcp: Kcp,
     /// Shared reference to the underlying UDP socket.
     socket: Arc<UdpSocket>,
+    /// The transport layer for sending and byte transformations.
+    transport: Arc<dyn KcpTransport>,
     /// The remote peer's address.
     remote_addr: SocketAddr,
     /// Session configuration.
@@ -69,16 +72,25 @@ impl KcpSession {
     /// # Arguments
     ///
     /// * `conv` — KCP conversation ID.
-    /// * `socket` — Shared UDP socket for sending and receiving.
+    /// * `socket` — Shared UDP socket for receiving.
+    /// * `transport` — Transport implementation for sending and byte transformations.
     /// * `remote_addr` — The remote peer's address.
     /// * `config` — Session configuration.
     pub fn new(
         conv: u32,
         socket: Arc<UdpSocket>,
+        transport: Arc<dyn KcpTransport>,
         remote_addr: SocketAddr,
         config: KcpSessionConfig,
     ) -> KcpTokioResult<Self> {
-        Self::new_inner(conv, socket, remote_addr, config, RecvMode::Socket)
+        Self::new_inner(
+            conv,
+            socket,
+            transport,
+            remote_addr,
+            config,
+            RecvMode::Socket,
+        )
     }
 
     /// Creates a new KCP session in channel mode (for server-side connections).
@@ -87,44 +99,48 @@ impl KcpSession {
     pub(crate) fn new_with_channel(
         conv: u32,
         socket: Arc<UdpSocket>,
+        transport: Arc<dyn KcpTransport>,
         remote_addr: SocketAddr,
         config: KcpSessionConfig,
         pkt_rx: mpsc::Receiver<Vec<u8>>,
     ) -> KcpTokioResult<Self> {
-        Self::new_inner(conv, socket, remote_addr, config, RecvMode::Channel(pkt_rx))
+        Self::new_inner(
+            conv,
+            socket,
+            transport,
+            remote_addr,
+            config,
+            RecvMode::Channel(pkt_rx),
+        )
     }
 
     /// Internal constructor shared by both socket and channel modes.
     fn new_inner(
         conv: u32,
         socket: Arc<UdpSocket>,
+        transport: Arc<dyn KcpTransport>,
         remote_addr: SocketAddr,
         config: KcpSessionConfig,
         recv_mode: RecvMode,
     ) -> KcpTokioResult<Self> {
-        let socket_clone = socket.clone();
+        let transport_for_kcp = transport.clone();
         let remote = remote_addr;
-        // The output callback sends KCP packets via UDP.
-        // Uses try_send_to to avoid blocking in the synchronous callback context.
+        // The output callback sends KCP packets via the transport.
+        // The transport's try_send must be non-blocking (called from sync context).
         let kcp = Kcp::with_config(
             conv,
             &config.kcp_config,
             move |data: &[u8]| -> io::Result<usize> {
-                match socket_clone.try_send_to(data, remote) {
-                    Ok(n) => Ok(n),
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(data.len()),
-                    // On Windows, ConnectionReset (error 10054) can occur when the
-                    // remote peer has closed its UDP socket. We silently ignore it
-                    // since KCP will handle retransmission or timeout on its own.
-                    Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => Ok(data.len()),
-                    Err(e) => Err(e),
-                }
+                // Apply outgoing byte transformation (e.g., encryption)
+                let processed = transport_for_kcp.process_outgoing(data, remote);
+                transport_for_kcp.try_send(&processed, remote)
             },
         )?;
         let now = Instant::now();
         Ok(Self {
             kcp,
             socket,
+            transport,
             remote_addr,
             udp_recv_buf: vec![0u8; config.recv_buf_size],
             config,
@@ -236,6 +252,11 @@ impl KcpSession {
         &self.socket
     }
 
+    /// Returns a reference to the transport implementation.
+    pub fn transport(&self) -> &Arc<dyn KcpTransport> {
+        &self.transport
+    }
+
     /// Returns a reference to the session configuration.
     pub fn config(&self) -> &KcpSessionConfig {
         &self.config
@@ -318,7 +339,14 @@ impl KcpSession {
                 tokio::select! {
                     result = self.socket.recv_from(&mut self.udp_recv_buf) => {
                         let (n, addr) = result?;
-                        if addr == self.remote_addr { self.last_recv_time = Instant::now(); self.kcp.input(&self.udp_recv_buf[..n]).ok(); }
+                        if addr == self.remote_addr {
+                            self.last_recv_time = Instant::now();
+                            // Apply incoming byte transformation (e.g., decryption)
+                            if let Some(processed) = self.transport.process_incoming(&self.udp_recv_buf[..n], addr) {
+                                self.kcp.input(&processed).ok();
+                            }
+                            // If None, packet is silently dropped
+                        }
                     }
                     _ = time::sleep(flush_interval) => {}
                 }
@@ -327,7 +355,14 @@ impl KcpSession {
                 tokio::select! {
                     pkt = rx.recv() => {
                         match pkt {
-                            Some(data) => { self.last_recv_time = Instant::now(); self.kcp.input(&data).ok(); }
+                            Some(data) => {
+                                self.last_recv_time = Instant::now();
+                                // Apply incoming byte transformation (e.g., decryption)
+                                if let Some(processed) = self.transport.process_incoming(&data, self.remote_addr) {
+                                    self.kcp.input(&processed).ok();
+                                }
+                                // If None, packet is silently dropped
+                            }
                             None => { self.closed = true; return Err(KcpTokioError::Closed); }
                         }
                     }

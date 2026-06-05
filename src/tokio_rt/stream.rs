@@ -24,6 +24,7 @@
 use super::config::KcpSessionConfig;
 use super::error::{KcpTokioError, KcpTokioResult};
 use super::session::KcpSession;
+use super::transport::{KcpTransport, KcpUdpTransport};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -106,8 +107,64 @@ impl KcpStream {
             "[::]:0"
         };
         let socket = Arc::new(UdpSocket::bind(local_addr).await?);
+        let transport = Arc::new(KcpUdpTransport::new(socket.clone()));
         let recv_buf_size = config.recv_buf_size;
-        let session = KcpSession::new(conv, socket, remote_addr, config)?;
+        let session = KcpSession::new(conv, socket, transport, remote_addr, config)?;
+        Ok(Self {
+            session,
+            read_buf: vec![0u8; recv_buf_size],
+            read_pos: 0,
+            read_len: 0,
+        })
+    }
+
+    /// Connects to a remote KCP server with a custom transport implementation.
+    ///
+    /// This method allows you to inject a custom [`KcpTransport`] for sending
+    /// and byte transformations (e.g., encryption, compression, custom I/O).
+    /// You must provide both the transport and the UDP socket it uses, so that
+    /// the same socket can be used for both sending and receiving.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` — Remote server address.
+    /// * `config` — Session configuration.
+    /// * `transport` — Custom transport implementation (should wrap `socket`).
+    /// * `socket` — UDP socket for receiving (same socket used by `transport`).
+    /// * `conv` — KCP conversation ID.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use kcp_io::tokio_rt::{KcpStream, KcpSessionConfig, KcpUdpTransport};
+    /// use std::sync::Arc;
+    /// use tokio::net::UdpSocket;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    /// let transport = Arc::new(KcpUdpTransport::new(socket.clone()));
+    /// let stream = KcpStream::connect_with_transport(
+    ///     "127.0.0.1:9090",
+    ///     KcpSessionConfig::fast(),
+    ///     transport,
+    ///     socket,
+    ///     0x1234,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_with_transport<A: tokio::net::ToSocketAddrs>(
+        addr: A,
+        config: KcpSessionConfig,
+        transport: Arc<dyn KcpTransport>,
+        socket: Arc<UdpSocket>,
+        conv: u32,
+    ) -> KcpTokioResult<Self> {
+        let remote_addr = tokio::net::lookup_host(addr).await?.next().ok_or_else(|| {
+            KcpTokioError::ConnectionFailed("could not resolve address".to_string())
+        })?;
+        let recv_buf_size = config.recv_buf_size;
+        let session = KcpSession::new(conv, socket, transport, remote_addr, config)?;
         Ok(Self {
             session,
             read_buf: vec![0u8; recv_buf_size],
@@ -275,7 +332,14 @@ impl AsyncRead for KcpStream {
             Poll::Ready(Ok(addr)) => {
                 let n = read_buf.filled().len();
                 if addr == this.session.remote_addr() {
-                    this.session.input(&udp_buf[..n]).ok();
+                    // Apply incoming byte transformation before feeding to KCP
+                    if let Some(processed) = this
+                        .session
+                        .transport()
+                        .process_incoming(&udp_buf[..n], addr)
+                    {
+                        this.session.input(&processed).ok();
+                    }
                 }
                 this.session.update();
                 match this.session.try_recv(&mut this.read_buf) {
@@ -392,6 +456,7 @@ enum RecvSource {
 pub struct OwnedReadHalf {
     session: Arc<TokioMutex<KcpSession>>,
     socket: Arc<UdpSocket>,
+    transport: Arc<dyn KcpTransport>,
     remote_addr: SocketAddr,
     recv_source: RecvSource,
     udp_recv_buf: Vec<u8>,
@@ -458,6 +523,7 @@ impl KcpStream {
     /// ```
     pub fn into_split(mut self) -> (OwnedReadHalf, OwnedWriteHalf) {
         let socket = self.session.socket().clone();
+        let transport = self.session.transport().clone();
         let remote_addr = self.session.remote_addr();
         let flush_interval = self.session.config().flush_interval;
         let recv_buf_size = self.session.config().recv_buf_size;
@@ -472,6 +538,7 @@ impl KcpStream {
         let read_half = OwnedReadHalf {
             session: session.clone(),
             socket,
+            transport,
             remote_addr,
             recv_source,
             udp_recv_buf: vec![0u8; recv_buf_size],
@@ -564,7 +631,8 @@ impl OwnedReadHalf {
                     result = self.socket.recv_from(&mut self.udp_recv_buf) => {
                         match result {
                             Ok((n, addr)) if addr == self.remote_addr => {
-                                Some(self.udp_recv_buf[..n].to_vec())
+                                // Apply incoming byte transformation
+                                self.transport.process_incoming(&self.udp_recv_buf[..n], addr)
                             }
                             Ok(_) => None,
                             Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => None,
@@ -578,7 +646,10 @@ impl OwnedReadHalf {
                 tokio::select! {
                     pkt = rx.recv() => {
                         match pkt {
-                            Some(data) => Some(data),
+                            Some(data) => {
+                                // Apply incoming byte transformation
+                                self.transport.process_incoming(&data, self.remote_addr)
+                            }
                             None => return Err(KcpTokioError::Closed),
                         }
                     }
@@ -670,10 +741,14 @@ impl AsyncRead for OwnedReadHalf {
             Poll::Ready(Ok(addr)) => {
                 let n = read_buf.filled().len();
                 if addr == this.remote_addr {
+                    // Apply incoming byte transformation before feeding to KCP
+                    let processed = this.transport.process_incoming(&udp_buf[..n], addr);
                     // Lock briefly to input and try recv
                     let mut lock_fut = Box::pin(this.session.lock());
                     if let Poll::Ready(mut session) = lock_fut.as_mut().poll(cx) {
-                        session.input(&udp_buf[..n]).ok();
+                        if let Some(data) = processed {
+                            session.input(&data).ok();
+                        }
                         session.update();
                         match session.try_recv(&mut this.read_buf) {
                             Ok(n) => {
