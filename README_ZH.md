@@ -147,6 +147,64 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### 自定义传输层 (`KcpTransport`)
+
+`KcpTransport` 是一个 trait，允许你在 KCP 数据包发送前和接收后拦截并转换字节流，甚至完全替换底层 I/O：
+
+```rust
+use kcp_io::{KcpStream, KcpSessionConfig, KcpTransport, KcpUdpTransport};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+
+/// 一个对 KCP 数据包进行 XOR 混淆的传输层。
+struct XorTransport {
+    inner: KcpUdpTransport,
+    key: u8,
+}
+
+impl KcpTransport for XorTransport {
+    fn try_send(&self, data: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        self.inner.try_send(data, addr)
+    }
+
+    fn process_outgoing(&self, data: &[u8], _addr: SocketAddr) -> Vec<u8> {
+        data.iter().map(|b| b ^ self.key).collect()
+    }
+
+    fn process_incoming(&self, data: &[u8], _addr: SocketAddr) -> Option<Vec<u8>> {
+        Some(data.iter().map(|b| b ^ self.key).collect())
+    }
+}
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let transport = Arc::new(XorTransport {
+        inner: KcpUdpTransport::new(socket.clone()),
+        key: 0x5A,
+    });
+
+    let mut stream = KcpStream::connect_with_transport(
+        "127.0.0.1:9090",
+        KcpSessionConfig::fast(),
+        transport,
+        socket,
+        0x1234,
+    ).await?;
+    // 所有 KCP 数据包在发送前会被 XOR 混淆，
+    // 接收后会被解混淆。
+    stream.send_kcp(b"hello").await?;
+    Ok(())
+}
+```
+
+自定义传输层的使用场景：
+- **加密**：在 `process_outgoing` / `process_incoming` 中加解密 KCP 数据包
+- **压缩**：发送前压缩，接收后解压
+- **日志/监控**：统计数据包数量、记录流量、测量吞吐量
+- **替代 I/O**：将 UDP 替换为 WebSocket、Unix 套接字或自定义通道
+
 ### 仅使用 Core 层
 
 如果你只需要安全的 KCP 封装，不需要异步支持：
@@ -180,6 +238,8 @@ kcp.update(0);
 | `KcpListener` | 在 UDP 套接字上接受传入的 KCP 连接 |
 | `KcpSessionConfig` | 运行时配置（KCP 参数 + 会话设置） |
 | `KcpTokioError` | 异步操作的错误类型 |
+| `KcpTransport` | 自定义传输层 trait（发包 + 字节处理钩子） |
+| `KcpUdpTransport` | 默认 UDP 传输层实现（封装 `Arc<UdpSocket>`） |
 
 **`KcpStream` 方法：**
 
@@ -187,6 +247,7 @@ kcp.update(0);
 |------|------|
 | `connect(addr, config)` | 连接到远程 KCP 服务器 |
 | `connect_with_conv(addr, conv, config)` | 使用指定的会话 ID 连接 |
+| `connect_with_transport(addr, config, transport, socket, conv)` | 使用自定义 [`KcpTransport`] 连接 |
 | `send_kcp(data)` | 可靠地发送数据 |
 | `recv_kcp(buf)` | 接收数据 |
 | `into_split()` | 拆分为 `OwnedReadHalf` + `OwnedWriteHalf`，支持并发读写 |
@@ -349,7 +410,10 @@ cargo build --release
 cargo test
 
 # 仅运行集成测试
-cargo test --test integration_tests
+cargo test --test basic --test recv_buffer --test split --test transport
+
+# 运行丢包测试（耗时较长，建议本地运行）
+cargo test --test packet_loss -- --ignored
 
 # 带日志运行
 RUST_LOG=debug cargo test -- --nocapture
@@ -388,9 +452,16 @@ kcp-io/
 │       ├── stream.rs       # KcpStream（AsyncRead + AsyncWrite）
 │       ├── listener.rs     # KcpListener（接受传入连接）
 │       ├── session.rs      # KcpSession（内部状态机）
+│       ├── transport.rs    # KcpTransport trait + KcpUdpTransport
 │       ├── config.rs       # KcpSessionConfig 运行时配置
 │       └── error.rs        # KcpTokioError 错误类型
-├── tests/                  # 集成测试
+├── tests/
+│   ├── common/mod.rs       # 共享测试工具
+│   ├── basic.rs            # 基础通信测试
+│   ├── recv_buffer.rs      # 自适应接收缓冲区测试
+│   ├── packet_loss.rs      # 丢包可靠性测试
+│   ├── split.rs            # 分流读写测试
+│   └── transport.rs        # 自定义传输层测试
 ├── benches/                # Criterion 基准测试
 └── examples/               # 回显服务器和客户端示例
 ```

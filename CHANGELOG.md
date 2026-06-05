@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.0.5] — 2026-06-05
+
+### Added
+
+- **`KcpTransport` trait**: New transport abstraction trait in `kcp_io::tokio_rt::transport`
+  that decouples KCP packet I/O from the session layer. The trait provides:
+  - `try_send()` — synchronous, non-blocking send (called from KCP's output callback)
+  - `process_outgoing()` — byte transformation hook before sending (KCP → wire)
+  - `process_incoming()` — byte transformation hook after receiving (wire → KCP)
+  Default implementations are identity (no transformation).
+- **`KcpUdpTransport`**: Default UDP-based transport implementation wrapping
+  `Arc<UdpSocket>`. Used automatically by `KcpStream::connect()` and
+  `KcpListener::bind()`.
+- **`KcpStream::connect_with_transport()`**: New constructor that accepts a custom
+  `Arc<dyn KcpTransport>` + `Arc<UdpSocket>` for advanced use cases (encryption,
+  compression, custom I/O).
+- **2 new integration tests**: `test_custom_transport_counting` and
+  `test_custom_transport_kcp_udp` verify custom transport end-to-end.
+
+### Changed
+
+- **KCP output callback uses transport**: The synchronous output callback in
+  `KcpSession` now routes through `transport.try_send()` and applies
+  `transport.process_outgoing()` instead of directly calling
+  `UdpSocket::try_send_to()`.
+- **Incoming packets pass through `process_incoming`**: Both `KcpSession::wait_for_data()`
+  and `OwnedReadHalf::wait_for_data()` now apply `transport.process_incoming()`
+  before feeding data to `Kcp::input()`, in both Socket and Channel recv modes.
+- **`KcpListener::accept_loop()`** now creates a per-session `KcpUdpTransport`
+  and passes it to `KcpSession::new_with_channel()`.
+- **`OwnedReadHalf`** now stores an `Arc<dyn KcpTransport>` for incoming
+  byte processing in split mode.
+- **Test suite reorganization**: Split the 800-line monolithic
+  `tests/integration_tests.rs` into 6 focused files:
+  - `tests/common/mod.rs` — shared helpers
+  - `tests/basic.rs` — basic communication
+  - `tests/recv_buffer.rs` — adaptive recv buffer
+  - `tests/packet_loss.rs` — packet loss reliability
+  - `tests/split.rs` — split stream
+  - `tests/transport.rs` — custom transport
+- **`KcpTransport` and `KcpUdpTransport`** are re-exported from both
+  `kcp_io::tokio_rt` and the crate root `kcp_io`.
+
+---
+
 ## [0.0.4] — 2026-03-24
 
 ### Changed

@@ -147,6 +147,64 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Custom Transport (`KcpTransport`)
+
+`KcpTransport` is a trait that lets you intercept and transform KCP packet data before sending and after receiving, or even replace the underlying I/O entirely:
+
+```rust
+use kcp_io::{KcpStream, KcpSessionConfig, KcpTransport, KcpUdpTransport};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::UdpSocket;
+
+/// A transport that XOR-obfuscates all KCP packets.
+struct XorTransport {
+    inner: KcpUdpTransport,
+    key: u8,
+}
+
+impl KcpTransport for XorTransport {
+    fn try_send(&self, data: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        self.inner.try_send(data, addr)
+    }
+
+    fn process_outgoing(&self, data: &[u8], _addr: SocketAddr) -> Vec<u8> {
+        data.iter().map(|b| b ^ self.key).collect()
+    }
+
+    fn process_incoming(&self, data: &[u8], _addr: SocketAddr) -> Option<Vec<u8>> {
+        Some(data.iter().map(|b| b ^ self.key).collect())
+    }
+}
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    let transport = Arc::new(XorTransport {
+        inner: KcpUdpTransport::new(socket.clone()),
+        key: 0x5A,
+    });
+
+    let mut stream = KcpStream::connect_with_transport(
+        "127.0.0.1:9090",
+        KcpSessionConfig::fast(),
+        transport,
+        socket,
+        0x1234,
+    ).await?;
+    // All KCP packets will be XOR-obfuscated before sending,
+    // and de-obfuscated after receiving.
+    stream.send_kcp(b"hello").await?;
+    Ok(())
+}
+```
+
+Use cases for custom transports:
+- **Encryption**: Encrypt/decrypt KCP packets in `process_outgoing` / `process_incoming`
+- **Compression**: Compress outgoing data, decompress incoming data
+- **Logging/Monitoring**: Count packets, log traffic, measure throughput
+- **Alternative I/O**: Replace UDP with WebSocket, Unix sockets, or custom channels
+
 ### Using Only the Core Layer
 
 If you only need the safe KCP wrapper without async support:
@@ -180,6 +238,8 @@ kcp.update(0);
 | `KcpListener` | Accepts incoming KCP connections on a UDP socket |
 | `KcpSessionConfig` | Runtime configuration (KCP params + session settings) |
 | `KcpTokioError` | Error type for async operations |
+| `KcpTransport` | Trait for custom transport implementations (send + byte hooks) |
+| `KcpUdpTransport` | Default UDP-based transport (wraps `Arc<UdpSocket>`) |
 
 **`KcpStream` methods:**
 
@@ -187,6 +247,7 @@ kcp.update(0);
 |--------|-------------|
 | `connect(addr, config)` | Connect to a remote KCP server |
 | `connect_with_conv(addr, conv, config)` | Connect with a specific conversation ID |
+| `connect_with_transport(addr, config, transport, socket, conv)` | Connect with a custom [`KcpTransport`] |
 | `send_kcp(data)` | Send data reliably |
 | `recv_kcp(buf)` | Receive data |
 | `into_split()` | Split into `OwnedReadHalf` + `OwnedWriteHalf` for concurrent read/write |
@@ -349,7 +410,10 @@ cargo build --release
 cargo test
 
 # Run only integration tests
-cargo test --test integration_tests
+cargo test --test basic --test recv_buffer --test split --test transport
+
+# Run packet loss tests (long-running, use locally)
+cargo test --test packet_loss -- --ignored
 
 # Run with logging
 RUST_LOG=debug cargo test -- --nocapture
@@ -388,9 +452,16 @@ kcp-io/
 │       ├── stream.rs       # KcpStream (AsyncRead + AsyncWrite)
 │       ├── listener.rs     # KcpListener (accept incoming connections)
 │       ├── session.rs      # KcpSession (internal state machine)
+│       ├── transport.rs    # KcpTransport trait + KcpUdpTransport
 │       ├── config.rs       # KcpSessionConfig
 │       └── error.rs        # KcpTokioError
-├── tests/                  # Integration tests
+├── tests/
+│   ├── common/mod.rs       # Shared test helpers
+│   ├── basic.rs            # Basic communication tests
+│   ├── recv_buffer.rs      # Adaptive recv buffer tests
+│   ├── packet_loss.rs      # Packet loss reliability tests
+│   ├── split.rs            # Split stream tests
+│   └── transport.rs        # Custom transport tests
 ├── benches/                # Criterion benchmarks
 └── examples/               # Echo server & client
 ```
