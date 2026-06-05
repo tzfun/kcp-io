@@ -63,8 +63,9 @@ async fn test_bidirectional_communication() {
 
     time::sleep(Duration::from_millis(50)).await;
 
-    let mut client =
-        KcpStream::connect_with_conv(server_addr, config, 0x100).await.unwrap();
+    let mut client = KcpStream::connect_with_conv(server_addr, config, 0x100)
+        .await
+        .unwrap();
 
     client.send_kcp(b"Hello from client").await.unwrap();
 
@@ -94,8 +95,9 @@ async fn test_multiple_messages() {
 
     time::sleep(Duration::from_millis(50)).await;
 
-    let mut client =
-        KcpStream::connect_with_conv(server_addr, config, 0x300).await.unwrap();
+    let mut client = KcpStream::connect_with_conv(server_addr, config, 0x300)
+        .await
+        .unwrap();
 
     let messages = [
         b"First message" as &[u8],
@@ -144,8 +146,9 @@ async fn test_large_data_transfer() {
 
     time::sleep(Duration::from_millis(50)).await;
 
-    let mut client =
-        KcpStream::connect_with_conv(server_addr, config, 0x200).await.unwrap();
+    let mut client = KcpStream::connect_with_conv(server_addr, config, 0x200)
+        .await
+        .unwrap();
 
     client.send_kcp(&large_data).await.unwrap();
 
