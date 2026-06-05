@@ -1,6 +1,6 @@
 [package]
 name = "kcp-io"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["tzfun beifengtz@qq.com"]
